@@ -1,41 +1,28 @@
 #![no_std]
 #![no_main]
-#![allow(nonstandard_style, dead_code)]
 
-use aya_bpf::{
+use aya_ebpf::{
     bindings::BPF_F_NO_PREALLOC,
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
     macros::{classifier, map},
     maps::{
+        HashMap,
         lpm_trie::{Key, LpmTrie},
-        HashMap, PerfEventArray,
     },
     programs::TcContext,
 };
+use network_types::{
+    ip::{IpProto, Ipv4Hdr, Ipv6Hdr},
+    tcp::TcpHdr,
+    udp::UdpHdr,
+};
 use strum::EnumCount;
 
-#[allow(clippy::all)]
-mod bindings;
+use core::{mem, net::IpAddr};
+use firewall_common::{ConfigOpt, RuleStore};
 
-use core::mem;
-use firewall_common::{ConfigOpt, PacketLog, RuleStore};
-use memoffset::offset_of;
-
-use crate::bindings::{iphdr, ipv6hdr, tcphdr, udphdr};
-
-#[cfg(feature = "rules1024")]
-const MAX_NUMBER_OF_RULES: u32 = 1024;
-#[cfg(feature = "rules512")]
-const MAX_NUMBER_OF_RULES: u32 = 512;
-#[cfg(feature = "rules256")]
-const MAX_NUMBER_OF_RULES: u32 = 256;
-#[cfg(feature = "rules128")]
-const MAX_NUMBER_OF_RULES: u32 = 128;
-#[cfg(feature = "rules64")]
-const MAX_NUMBER_OF_RULES: u32 = 64;
-#[cfg(feature = "rules32")]
-const MAX_NUMBER_OF_RULES: u32 = 32;
+mod limits;
 
 type ID = [u8; 16];
 
@@ -43,38 +30,33 @@ type ID = [u8; 16];
 // but alas! this is not supported yet https://github.com/rust-lang/rust/issues/52393
 // As soon as it is: move map names to const in common crate and use that instead of hardcoding
 
-#[map(name = "EVENTS")]
-static mut EVENTS: PerfEventArray<PacketLog> =
-    PerfEventArray::<PacketLog>::with_max_entries(1024, 0);
-
 #[map(name = "SOURCE_ID_IPV4")]
-static mut SOURCE_ID_IPV4: HashMap<[u8; 4], ID> = HashMap::<[u8; 4], ID>::with_max_entries(1024, 0);
+static SOURCE_ID_IPV4: HashMap<[u8; 4], ID> = HashMap::<[u8; 4], ID>::with_max_entries(1024, 0);
 
 #[map(name = "RULE_MAP_IPV4")]
-static mut RULE_MAP_IPV4: LpmTrie<[u8; 21], RuleStore> =
-    LpmTrie::<[u8; 21], RuleStore>::with_max_entries(MAX_NUMBER_OF_RULES, BPF_F_NO_PREALLOC);
+static RULE_MAP_IPV4: LpmTrie<[u8; 21], RuleStore> =
+    LpmTrie::<[u8; 21], RuleStore>::with_max_entries(
+        limits::MAX_NUMBER_OF_RULES,
+        BPF_F_NO_PREALLOC,
+    );
 
 #[map(name = "SOURCE_ID_IPV6")]
-static mut SOURCE_ID_IPV6: HashMap<[u8; 16], ID> =
-    HashMap::<[u8; 16], ID>::with_max_entries(1024, 0);
+static SOURCE_ID_IPV6: HashMap<[u8; 16], ID> = HashMap::<[u8; 16], ID>::with_max_entries(1024, 0);
 
 #[map(name = "RULE_MAP_IPV6")]
-static mut RULE_MAP_IPV6: LpmTrie<[u8; 33], RuleStore> =
-    LpmTrie::<[u8; 33], RuleStore>::with_max_entries(MAX_NUMBER_OF_RULES, BPF_F_NO_PREALLOC);
+static RULE_MAP_IPV6: LpmTrie<[u8; 33], RuleStore> =
+    LpmTrie::<[u8; 33], RuleStore>::with_max_entries(
+        limits::MAX_NUMBER_OF_RULES,
+        BPF_F_NO_PREALLOC,
+    );
 
 // For now this just configs the default action
 // However! We can use this eventually to share more runtime configs
 #[map(name = "CONFIG")]
-static mut CONFIG: HashMap<ConfigOpt, i32> =
+static CONFIG: HashMap<ConfigOpt, i32> =
     HashMap::<ConfigOpt, i32>::with_max_entries(ConfigOpt::COUNT as u32, 0);
 
-macro_rules! offsets_off {
-    ($parent:path, $($field:tt),+) => {
-        ($(offset_of!($parent, $field)),+)
-    };
-}
-
-#[classifier(name = "ebpf_firewall")]
+#[classifier]
 pub fn ebpf_firewall(ctx: TcContext) -> i32 {
     match unsafe { try_ebpf_firewall(ctx) } {
         Ok(ret) => ret,
@@ -82,100 +64,163 @@ pub fn ebpf_firewall(ctx: TcContext) -> i32 {
     }
 }
 
-fn version(hd: u8) -> u8 {
+fn version_inner(hd: u8) -> u8 {
     (hd & 0xf0) >> 4
 }
 
-unsafe fn try_ebpf_firewall(ctx: TcContext) -> Result<i32, i64> {
-    // Endianess??
-    let version = version(ctx.load(ETH_HDR_LEN)?);
-    match version {
-        6 => process(ctx, version, &SOURCE_ID_IPV6, &RULE_MAP_IPV6),
-        4 => process(ctx, version, &SOURCE_ID_IPV4, &RULE_MAP_IPV4),
-        _ => Err(-1),
+/// This is very similar to `network_types::IpHdr` but gives us generic methods to access the underlying packet fields without destructuring
+#[derive(Clone, Copy)]
+enum IpHdr<'a> {
+    V4 { hdr: Ipv4Hdr, ctx: &'a TcContext },
+    V6 { hdr: Ipv6Hdr, ctx: &'a TcContext },
+}
+
+enum Transport {
+    Tcp(TcpHdr),
+    Udp(UdpHdr),
+}
+
+impl Transport {
+    fn sport(&self) -> u16 {
+        match self {
+            Transport::Tcp(tcp_hdr) => tcp_hdr.source,
+            Transport::Udp(udp_hdr) => udp_hdr.source(),
+        }
+    }
+
+    fn dport(&self) -> u16 {
+        match self {
+            Transport::Tcp(tcp_hdr) => tcp_hdr.dest,
+            Transport::Udp(udp_hdr) => udp_hdr.dest(),
+        }
     }
 }
 
-unsafe fn process<const N: usize, const M: usize>(
-    ctx: TcContext,
-    version: u8,
-    source_map: &HashMap<[u8; N], ID>,
-    rule_map: &LpmTrie<[u8; M], RuleStore>,
-) -> Result<i32, i64> {
-    let (source, dest, proto) = load_ntw_headers(&ctx, version)?;
-    let (dest_port, src_port) = get_port(&ctx, version, proto)?;
-    let class = source_class(source_map, source);
-    let action = get_action(class, dest, rule_map, dest_port, proto);
-    let source = as_log_array(source);
-    let dest = as_log_array(dest);
-    let log_entry = PacketLog {
-        source,
-        dest,
+impl<'a> IpHdr<'a> {
+    fn proto(&self) -> IpProto {
+        match self {
+            IpHdr::V4 { hdr, .. } => hdr.proto,
+            IpHdr::V6 { hdr, .. } => hdr.next_hdr,
+        }
+    }
+
+    fn hdr_len(&self) -> usize {
+        match self {
+            IpHdr::V4 { .. } => ETH_HDR_LEN + Ipv4Hdr::LEN,
+            IpHdr::V6 { .. } => ETH_HDR_LEN + Ipv6Hdr::LEN,
+        }
+    }
+
+    fn ctx(&self) -> &TcContext {
+        match self {
+            IpHdr::V4 { ctx, .. } => ctx,
+            IpHdr::V6 { ctx, .. } => ctx,
+        }
+    }
+
+    fn transport(&self) -> Option<Transport> {
+        unsafe {
+            match self.proto() {
+                IpProto::Tcp => Some(Transport::Tcp(*ptr_at(self.ctx(), self.hdr_len()).ok()?)),
+                IpProto::Udp => Some(Transport::Udp(*ptr_at(self.ctx(), self.hdr_len()).ok()?)),
+                _ => None,
+            }
+        }
+    }
+
+    fn sport(&self) -> Option<u16> {
+        self.transport().map(|t| t.sport())
+    }
+
+    fn dport(&self) -> Option<u16> {
+        self.transport().map(|t| t.dport())
+    }
+
+    fn saddr(&self) -> IpAddr {
+        match self {
+            IpHdr::V4 { hdr, .. } => hdr.src_addr().into(),
+            IpHdr::V6 { hdr, .. } => hdr.src_addr().into(),
+        }
+    }
+
+    fn daddr(&self) -> IpAddr {
+        match self {
+            IpHdr::V4 { hdr, .. } => hdr.dst_addr().into(),
+            IpHdr::V6 { hdr, .. } => hdr.dst_addr().into(),
+        }
+    }
+
+    fn class(&self) -> Option<ID> {
+        match self {
+            IpHdr::V4 { hdr, .. } => unsafe { SOURCE_ID_IPV4.get(&hdr.src_addr).copied() },
+            IpHdr::V6 { hdr, .. } => unsafe { SOURCE_ID_IPV6.get(&hdr.src_addr).copied() },
+        }
+    }
+
+    fn action(&self) -> Option<i32> {
+        match self {
+            IpHdr::V4 { hdr, .. } => Some(get_action(
+                self.class(),
+                hdr.dst_addr,
+                &RULE_MAP_IPV4,
+                self.dport()?,
+                self.proto() as u8,
+            )),
+            IpHdr::V6 { hdr, .. } => Some(get_action(
+                self.class(),
+                hdr.dst_addr,
+                &RULE_MAP_IPV6,
+                self.dport()?,
+                self.proto() as u8,
+            )),
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> {
+    let start = ctx.data();
+    let end = ctx.data_end();
+    let len = mem::size_of::<T>();
+
+    if start + offset + len > end {
+        return Err(());
+    }
+
+    Ok((start + offset) as *const T)
+}
+
+// TODO: it could be the case that this isn't an IP packet, then this whole thing is UB.
+fn packet(ctx: &TcContext) -> Result<IpHdr, ()> {
+    unsafe {
+        match version_inner(*ptr_at(ctx, ETH_HDR_LEN)?) {
+            4 => Ok(IpHdr::V4 {
+                hdr: *ptr_at(ctx, ETH_HDR_LEN)?,
+                ctx,
+            }),
+            6 => Ok(IpHdr::V6 {
+                hdr: *ptr_at(ctx, ETH_HDR_LEN)?,
+                ctx,
+            }),
+            _ => Err(()),
+        }
+    }
+}
+
+unsafe fn try_ebpf_firewall(ctx: TcContext) -> Result<i32, ()> {
+    let packet = packet(&ctx)?;
+    let action = packet.action().ok_or(())?;
+    aya_log_ebpf::info!(
+        &ctx,
+        "[{}] saddr = {} daddr = {} sport = {} dport = {} proto = {}",
         action,
-        dest_port,
-        src_port,
-        proto,
-        version,
-        class: class.unwrap_or([0; 16]),
-        pad: [0; 2],
-    };
-    EVENTS.output(&ctx, &log_entry, 0);
+        packet.saddr(),
+        packet.daddr(),
+        packet.sport().unwrap_or_default(),
+        packet.dport().unwrap_or_default(),
+        packet.proto() as u8
+    );
     Ok(action)
-}
-
-fn load_sk_buff<T>(ctx: &TcContext, offset: usize) -> Result<T, i64> {
-    ctx.load::<T>(ETH_HDR_LEN + offset)
-}
-
-fn load_ntw_headers<const N: usize>(
-    ctx: &TcContext,
-    version: u8,
-) -> Result<([u8; N], [u8; N], u8), i64> {
-    let (source_off, dest_off, proto_off) = match version {
-        6 => offsets_off!(ipv6hdr, saddr, daddr, nexthdr),
-        4 => offsets_off!(iphdr, saddr, daddr, protocol),
-        _ => unreachable!("Should only call with valid packet"),
-    };
-    let source = load_sk_buff(ctx, source_off)?;
-    let dest = load_sk_buff(ctx, dest_off)?;
-    let next_header = load_sk_buff(ctx, proto_off)?;
-    Ok((source, dest, next_header))
-}
-
-fn get_port(ctx: &TcContext, version: u8, proto: u8) -> Result<(u16, u16), i64> {
-    let ip_len = match version {
-        6 => IPV6_HDR_LEN,
-        4 => IP_HDR_LEN,
-        _ => unreachable!("Should only call with valid packet"),
-    };
-    let dest_port = match proto {
-        TCP => u16::from_be(ctx.load(ETH_HDR_LEN + ip_len + offset_of!(tcphdr, dest))?),
-        UDP => u16::from_be(ctx.load(ETH_HDR_LEN + ip_len + offset_of!(udphdr, dest))?),
-        _ => 0,
-    };
-
-    let src_port = match proto {
-        TCP => u16::from_be(ctx.load(ETH_HDR_LEN + ip_len + offset_of!(tcphdr, source))?),
-        UDP => u16::from_be(ctx.load(ETH_HDR_LEN + ip_len + offset_of!(udphdr, source))?),
-        _ => 0,
-    };
-
-    Ok((dest_port, src_port))
-}
-
-fn as_log_array<const N: usize>(from: [u8; N]) -> [u8; 16] {
-    let mut to = [0u8; 16];
-    let (to_l, _) = to.split_at_mut(N);
-    to_l.copy_from_slice(&from);
-    to
-}
-
-unsafe fn source_class<const N: usize>(
-    source_map: &HashMap<[u8; N], ID>,
-    address: [u8; N],
-) -> Option<[u8; 16]> {
-    // Race condition if ip changes group?
-    source_map.get(&address).copied()
 }
 
 fn get_action<const N: usize, const M: usize>(
@@ -185,7 +230,7 @@ fn get_action<const N: usize, const M: usize>(
     port: u16,
     proto: u8,
 ) -> i32 {
-    let proto = if port == 0 { TCP } else { proto };
+    let proto = if port == 0 { IpProto::Tcp as u8 } else { proto };
     let default_action = get_default_action();
 
     let rule_store = rule_map.get(&Key::new((M * 8) as u32, get_key(group, proto, address)));
@@ -224,7 +269,6 @@ fn get_key<const N: usize, const M: usize>(
     proto: u8,
     address: [u8; N],
 ) -> [u8; M] {
-    // TODO: Could use MaybeUninit
     let group = group.unwrap_or_default();
     let mut res = [0; M];
     let (res_left, res_address) = res.split_at_mut(17);
@@ -240,15 +284,10 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     unsafe { core::hint::unreachable_unchecked() }
 }
 
-const ETH_P_IP: u16 = 0x0800;
-const IP_HDR_LEN: usize = mem::size_of::<iphdr>();
-const IPV6_HDR_LEN: usize = mem::size_of::<ipv6hdr>();
-const TCP: u8 = 0x06;
-const UDP: u8 = 0x11;
 const DEFAULT_ACTION: i32 = TC_ACT_SHOT;
 
 #[cfg(not(feature = "wireguard"))]
-const ETH_HDR_LEN: usize = mem::size_of::<bindings::ethhdr>();
+const ETH_HDR_LEN: usize = network_types::eth::EthHdr::LEN;
 
 #[cfg(feature = "wireguard")]
 const ETH_HDR_LEN: usize = 0;

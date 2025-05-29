@@ -1,18 +1,18 @@
 [package]
 name = "firewall-ebpf"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-aya-bpf = { git = "https://github.com/aya-rs/aya", rev = "88d77775530341ec32ff4f764b729e53a48c0de0" }
+aya-ebpf = "0.1"
 firewall-common = { path = "../userspace/firewall-common" }
-memoffset = "0.6"
-strum = { version = "0.24", default-features = false }
+memoffset = "0.9"
+strum = { version = "0.27", default-features = false }
+network-types = { version = "0.0.8" }
+aya-log-ebpf = "0.1.1"
 
 [features]
-default = ["rules256"]
 wireguard = []
-rules1024 = []
 rules512 = []
 rules256 = []
 rules128 = []

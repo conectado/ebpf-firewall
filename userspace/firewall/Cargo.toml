@@ -24,16 +24,16 @@ rules64 = []
 rules32 = []
 
 [dependencies]
-aya = { git = "https://github.com/aya-rs/aya.git", rev = "88d77775530341ec32ff4f764b729e53a48c0de0" }
+aya = { version = "0.13" }
 firewall-common = { path = "../firewall-common", features = ["user"] }
 tracing = "0.1"
-bytes = "1.2.1"
+bytes = "1.10.1"
 tokio = { version = "1", optional = true, default-features = false }
 async-std = { version = "1", optional = true, default-features = false }
-thiserror = "1"
-ipnet = "2.5"
+thiserror = "2"
+ipnet = "2.11"
 # used for logging
-uuid = { version = "1.2", features = ["serde"] }
+uuid = { version = "1.17", features = ["serde"] }
 num-traits = "0.2"
 chrono = "0.4"
 serde_json = "1.0"
@@ -42,8 +42,8 @@ serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
 tracing-subscriber = "0.3"
-clap = { version = "3.1", features = ["derive"] }
-tokio = { version = "1.18", default-features = false, features = [
+clap = { version = "4.5", features = ["derive"] }
+tokio = { version = "1.45", default-features = false, features = [
     "signal",
     "rt",
     "macros",
@@ -51,4 +51,4 @@ tokio = { version = "1.18", default-features = false, features = [
 ] }
 anyhow = "1"
 libc = "0.2"
-test-case = "2.2"
+test-case = "3.3"
