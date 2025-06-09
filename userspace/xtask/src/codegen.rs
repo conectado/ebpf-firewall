@@ -4,7 +4,7 @@ use std::{fs::File, io::Write, path::PathBuf};
 pub fn generate() -> Result<(), anyhow::Error> {
     let dir = PathBuf::from("../ebpf/src");
     let names: Vec<&str> = vec!["iphdr", "ipv6hdr", "ethhdr", "udphdr", "tcphdr"];
-    let bindings = aya_tool::generate(
+    let bindings = aya_tool::generate::generate(
         InputFile::Btf(PathBuf::from("/sys/kernel/btf/vmlinux")),
         &names,
         &[],

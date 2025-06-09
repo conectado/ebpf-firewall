@@ -1,9 +1,11 @@
+use std::borrow::BorrowMut;
+
 use aya::{
-    maps::{
-        lpm_trie::{Key, LpmTrie},
-        HashMap, MapData, MapError,
-    },
     Pod,
+    maps::{
+        HashMap, MapData, MapError,
+        lpm_trie::{Key, LpmTrie},
+    },
 };
 
 pub trait BpfStore {
@@ -14,7 +16,7 @@ pub trait BpfStore {
     fn remove(&mut self, key: &Self::K) -> Result<(), MapError>;
 }
 
-impl<T: AsMut<MapData> + AsRef<MapData>, K: Pod, V: Pod> BpfStore for LpmTrie<T, K, V> {
+impl<T: BorrowMut<MapData>, K: Pod, V: Pod> BpfStore for LpmTrie<T, K, V> {
     type K = Key<K>;
     type V = V;
     fn insert(&mut self, key: &Self::K, value: Self::V) -> Result<(), MapError> {
@@ -30,7 +32,7 @@ impl<T: AsMut<MapData> + AsRef<MapData>, K: Pod, V: Pod> BpfStore for LpmTrie<T,
     }
 }
 
-impl<T: AsMut<MapData> + AsRef<MapData>, K: Pod, V: Pod> BpfStore for HashMap<T, K, V> {
+impl<T: BorrowMut<MapData>, K: Pod, V: Pod> BpfStore for HashMap<T, K, V> {
     type K = K;
     type V = V;
     fn insert(&mut self, key: &Self::K, value: Self::V) -> Result<(), MapError> {
@@ -50,7 +52,7 @@ impl<T: AsMut<MapData> + AsRef<MapData>, K: Pod, V: Pod> BpfStore for HashMap<T,
 pub(crate) mod test_store {
     use std::{collections::HashMap, hash::Hash, marker::PhantomData};
 
-    use aya::{maps::MapError, Pod};
+    use aya::{Pod, maps::MapError};
 
     use super::BpfStore;
 

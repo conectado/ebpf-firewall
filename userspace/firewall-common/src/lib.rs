@@ -2,9 +2,7 @@
 #![cfg_attr(not(feature = "user"), feature(int_log))]
 mod rule_store;
 
-use core::net::IpAddr;
-
-pub use rule_store::{Action, RuleStore, GENERIC_PROTO};
+pub use rule_store::{Action, GENERIC_PROTO, RuleStore};
 
 #[cfg(feature = "user")]
 pub use rule_store::RuleStoreError;

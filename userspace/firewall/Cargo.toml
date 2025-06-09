@@ -1,7 +1,7 @@
 [package]
 name = "firewall"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 publish = false
 
 [features]
@@ -24,7 +24,7 @@ rules64 = []
 rules32 = []
 
 [dependencies]
-aya = { version = "0.13" }
+aya = { version = "0.13", default-features = false }
 firewall-common = { path = "../firewall-common", features = ["user"] }
 tracing = "0.1"
 bytes = "1.10.1"

@@ -1,22 +1,20 @@
 use std::convert::TryFrom;
 
 use aya::{
-    include_bytes_aligned,
+    Bpf, include_bytes_aligned,
     maps::{HashMap, LpmTrie},
-    programs::{tc, SchedClassifier, TcAttachType},
-    Bpf,
+    programs::{SchedClassifier, TcAttachType, tc},
 };
 use firewall_common::Action;
 use ipnet::IpNet;
 use tracing::instrument;
 
 use crate::{
+    Error::MapNotFound,
+    RULE_MAP_IPV4, RULE_MAP_IPV6, Result, Rule, SOURCE_ID_IPV4, SOURCE_ID_IPV6,
     classifier::{ClassifierV4, ClassifierV6},
     config::ConfigHandler,
-    logger::Logger,
     rule_tracker::{RuleTrackerV4, RuleTrackerV6},
-    Error::MapNotFound,
-    Result, Rule, RULE_MAP_IPV4, RULE_MAP_IPV6, SOURCE_ID_IPV4, SOURCE_ID_IPV6,
 };
 
 /// Represents a Firewall currently blocking/allowing packets.
@@ -33,7 +31,6 @@ pub struct Firewall {
     rule_tracker_v6: RuleTrackerV6,
     classifier_v4: ClassifierV4,
     classifier_v6: ClassifierV6,
-    logger: Logger,
     config: ConfigHandler,
 }
 
@@ -73,14 +70,13 @@ impl Firewall {
         program.load()?;
         tracing::trace!("Loaded ebpf program");
 
-        program.attach(iface.as_ref(), TcAttachType::Ingress, 0)?;
+        program.attach(iface.as_ref(), TcAttachType::Ingress)?;
         tracing::trace!("Attached program to interface");
 
         let rule_tracker_v4 = RuleTrackerV4::new()?;
         let rule_tracker_v6 = RuleTrackerV6::new()?;
         let classifier_v4 = ClassifierV4::new()?;
         let classifier_v6 = ClassifierV6::new()?;
-        let logger = Logger::new()?;
         let config = ConfigHandler::new()?;
         tracing::trace!("Successfully created userspace references to ebpf maps");
 
@@ -90,7 +86,6 @@ impl Firewall {
             rule_tracker_v6,
             classifier_v4,
             classifier_v6,
-            logger,
             config,
         })
     }
@@ -247,18 +242,5 @@ impl Firewall {
             id,
         )?;
         Ok(())
-    }
-
-    /// Starts logging incoming packets to `info` level fo the [tracing] crate.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use firewall::Firewall;
-    /// let mut fw = Firewall::new("eth0").unwrap();
-    /// fw.start_logging().unwrap();
-    /// ```
-    #[instrument(level = "trace", skip(self))]
-    pub fn start_logging(&mut self) -> Result<()> {
-        self.logger.init(&mut self.bpf)
     }
 }

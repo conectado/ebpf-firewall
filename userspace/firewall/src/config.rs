@@ -1,7 +1,8 @@
-use aya::{maps::HashMap, Bpf};
+use aya::Bpf;
+use aya::maps::HashMap;
 use firewall_common::{Action, ConfigOpt};
 
-use crate::{Error, Result, CONFIG};
+use crate::{CONFIG, Error, Result};
 
 pub struct ConfigHandler {
     store_name: String,
